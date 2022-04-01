@@ -6,8 +6,6 @@ lateralMovesRollup<-QBSnapshots %>%
   filter(positionBegin!='Not Specified' & positionEnd!='Not Specified') %>%
   ### THIS FILTER IS VERY IMPORTANT -- IT GETS RID OF NOISEY MOVEMENT INTO- AND OUT OF POSITIONS THAT REALLY MESSES THINGS UP
   filter(positionBegin!=positionEnd) %>%
-  ### REMOVE TECHNICIAN PROGRAM -- EXPLAIN THIS TO PETER
-  filter(positionBegin!='Technician Program') %>%
   group_by(latType) %>%
   summarise(freq=length(EmployeeID)) %>%
   arrange(-freq) %>%
@@ -16,13 +14,8 @@ lateralMovesRollup<-QBSnapshots %>%
 
 moves<-data.frame()
 
-
-Sys.time()
-
 for(i in 1:nrow(lateralMovesRollup)) {
-  
-  #i<-1
-  
+
   moveString<-lateralMovesRollup$latType[i] 
   fromPosition <- sub("_TO_.*", "", moveString)      
   toPosition <- sub(".*_TO_", "", moveString)
@@ -30,8 +23,6 @@ for(i in 1:nrow(lateralMovesRollup)) {
   modelData <- QBSnapshots %>%
     filter(positionBegin==fromPosition) %>%
     mutate(lateral_i=ifelse(positionEnd==toPosition,1,0)) 
-    #%>%
-    #filter(EmployeeID!=371237)
   
   lmModel <- gam(lateral_i ~ s(Tenure), family=binomial, data=modelData)
 
@@ -40,7 +31,7 @@ for(i in 1:nrow(lateralMovesRollup)) {
       ggplot(aes(Tenure,risk)) + geom_line()
   
   activeHeadcount_i <- activeHeadcount %>%
-    filter(Position1==fromPosition) %>%
+    filter(Position2==fromPosition) %>%
     mutate(risk=predict(lmModel,newdata=.,type="response"))
   
   moves_i <- data.frame(
@@ -53,36 +44,34 @@ for(i in 1:nrow(lateralMovesRollup)) {
   
 }
 
-Sys.time()
-
 moves<-filter(moves,moves!=0)
 
   ### check against history
 qaTransfers <- moves %>%
   mutate(latType=paste(from,to,sep='_TO_')) %>%
   select(latType,moves) %>%
-  mutate(moves=24*moves) %>%
+  mutate(moves=36*moves) %>%
   left_join(.,lateralMovesRollup,by='latType')
   
   ### create net table
 losses <- moves %>%
-  rename('Position1'='from') %>% 
+  rename('Position2'='from') %>% 
   select(-to) %>%
   rename('losses'='moves') %>%
-  group_by(Position1) %>%
+  group_by(Position2) %>%
   summarise(losses=sum(losses)) %>%
   ungroup()
 
 gains <- moves %>%
-  rename('Position1'='to') %>%
+  rename('Position2'='to') %>%
   select(-from) %>%
   rename('gains'='moves') %>%
-  group_by(Position1) %>%
+  group_by(Position2) %>%
   summarise(gains=sum(gains)) %>%
   ungroup()
 
 netMoves <-  gains %>%
-  merge(.,losses,by="Position1",all.x=TRUE,all.y=TRUE) %>%
+  merge(.,losses,by="Position2",all.x=TRUE,all.y=TRUE) %>%
   mutate(gains=replace_na(gains,0),
          losses=replace_na(losses,0)) %>%
   mutate(net=gains-losses)
@@ -92,32 +81,34 @@ netMoves <-  gains %>%
 
 promotionsRollup<-QBSnapshots %>%
   filter(promotion==1 & levelBegin!=999 & levelEnd!=999) %>%
-  group_by(Position1,promType) %>%
+  ### filter out executives and one level below (since we are not modeling promotions to Executive level)
+  filter(levelBegin<=8) %>%
+  group_by(Position2,promType) %>%
   summarise(freq=length(EmployeeID)) %>%
   arrange(-freq) %>%
   #filter(freq>=5) %>%
   ungroup()
 
 promotionsLarge <- promotionsRollup %>%
-  filter(freq>=15) %>%
-  mutate(promType2=paste(Position1,substr(promType,1,1),sep='_'))
+  filter(freq>=10) %>%
+  mutate(promType2=paste(Position2,substr(promType,1,1),sep='_'))
 
 
 proms<-data.frame()
 
 ### Frequent Promotions (each gets its own GAM model)
 
-pdf('D:/Development/Diagnostics/LMCO Mobility/promotionGams.pdf')
+pdf('D:/Development/predict/Diagnostics/Ericsson Mobility/promotionGams.pdf')
 
 for(i in 1:nrow(promotionsLarge)) {
   
-  pos1String <- as.character(promotionsLarge$Position1[i])
+  pos1String <- as.character(promotionsLarge$Position2[i])
   moveString<-promotionsLarge$promType[i] 
   fromLevel <- as.numeric(sub("_TO_.*", "", moveString))      
   toLevel <- as.numeric(sub(".*_TO_", "", moveString))
   
   modelData <- QBSnapshots %>%
-    filter(Position1==pos1String & levelBegin==fromLevel) %>%
+    filter(Position2==pos1String & levelBegin==fromLevel) %>%
     mutate(prom_i=ifelse(levelEnd==toLevel,1,0))
   
   lmModel <- gam(prom_i ~ s(Tenure), family=binomial,sp=.2, data=modelData)
@@ -128,11 +119,11 @@ for(i in 1:nrow(promotionsLarge)) {
     ggtitle(paste(pos1String,moveString,sep='')))
   
   activeHeadcount_i <- activeHeadcount %>%
-    filter(Position1==pos1String & level==fromLevel) %>%
+    filter(Position2==pos1String & level==fromLevel) %>%
     mutate(risk=predict(lmModel,newdata=.,type="response"))
   
   proms_i <- data.frame(
-    Position1=pos1String,
+    Position2=pos1String,
     from=fromLevel,
     to=toLevel,
     moves=round(sum(activeHeadcount_i$risk)/6,3)
@@ -147,19 +138,27 @@ dev.off()
 proms<-filter(proms,moves!=0)
 
 
+
+
+
+
 ### Less Frequent Promotions (pooled model)
 pooledModelData <- QBSnapshots %>%
-  mutate(promType2=paste(Position1,level,sep='_')) %>%
+  mutate(promType2=paste(Position2,level,sep='_')) %>%
   filter(!(promType2 %in% promotionsLarge$promType2))
 
 activeHeadcountPooledModel <- activeHeadcount %>%
-  mutate(promType2=paste(Position1,level,sep='_')) %>%
+  mutate(promType2=paste(Position2,level,sep='_')) %>%
   filter(!(promType2 %in% promotionsLarge$promType2))
 
 promsPooled<-data.frame()
 
-pdf('D:/Development/Diagnostics/LMCO Mobility/promotionsPooledModel.pdf')
+pdf('D:/Development/predict/Diagnostics/Ericsson Mobility/promotionPooledModel.pdf')
 
+
+
+### note -- only going level 1 to 8, even though there are 10 levels, since 10's can't go any higher,
+  ### and promotions to 10 (executive) are rare and no something we want to model, so we are not considering 9's to be promotion eligible
 for(i in 1:8){
 
   modelData<-pooledModelData %>%
@@ -175,7 +174,7 @@ for(i in 1:8){
   activeHeadcount_i <- activeHeadcountPooledModel %>%
     filter(level==i) %>%
     mutate(risk=as.numeric(predict(lmModel,newdata=.,type="response"))) %>%
-    group_by(Position1,Position2) %>%
+    group_by(Position2,Position3) %>%
     summarise(moves=sum(risk)) %>%
     ungroup()
   
@@ -186,9 +185,9 @@ for(i in 1:8){
 dev.off()
 
 promsPooled <- promsPooled %>%
-  mutate(from=as.numeric(substr(Position2,7,7))) %>%
+  mutate(from=as.numeric(substr(Position3,2,2))) %>%
   mutate(to=from+1) %>%
-  select(Position1,from,to,moves)
+  select(Position2,from,to,moves)
 
 proms<-rbind(proms,promsPooled)
 
@@ -199,15 +198,15 @@ proms<-rbind(proms,promsPooled)
 ### check against history
 qaPromotions <- proms %>%
   mutate(promType=paste(from,to,sep='_TO_')) %>%
-  select(Position1,promType,moves) %>%
-  mutate(moves=24*moves) %>%
-  left_join(.,promotionsRollup,by=c('Position1','promType'))
+  select(Position2,promType,moves) %>%
+  mutate(moves=36*moves) %>%
+  left_join(.,promotionsRollup,by=c('Position2','promType'))
 
 losses <- proms %>%
   rename('level'='from') %>% 
   select(-to) %>%
   rename('losses'='moves') %>%
-  group_by(Position1,level) %>%
+  group_by(Position2,level) %>%
   summarise(losses=sum(losses)) %>%
   ungroup()
 
@@ -215,12 +214,12 @@ gains <- proms %>%
   rename('level'='to') %>% 
   select(-from) %>%
   rename('gains'='moves') %>%
-  group_by(Position1,level) %>%
+  group_by(Position2,level) %>%
   summarise(gains=sum(gains)) %>%
   ungroup()
 
 netProms <-  gains %>%
-  merge(.,losses,by=c("Position1","level"),all.x=TRUE,all.y=TRUE) %>%
+  merge(.,losses,by=c("Position2","level"),all.x=TRUE,all.y=TRUE) %>%
   mutate(gains=replace_na(gains,0),
          losses=replace_na(losses,0)) %>%
   mutate(net=gains-losses)

@@ -8,59 +8,56 @@ library(ggplot2)
 library(gdata)
 
 
-
-
-#### LEFT OFF HERE -- NEED TO figure out why Not Specified to Not Specified is showing up as lateral==1, and also, why in general, there seem to be 
-### lot of lateral=1 and lateral_i=0 in the modelData set
-
-
-
-
 ######### DON'T FORGET -- THIS ALSO RUNS ON QBSNAPSHOTS, THE TABLE YOU UPDATE IN THE SQL PROCEDURE AND USE FOR THE TURNOVER PROCESS
-
 ## Import ----
-sqlConnString <- odbcDriverConnect(paste("Driver=SQL Server Native Client 11.0; Server=", "172.24.16.7", ";Database=", "LMCO_DW", ";Trusted_Connection=yes;", sep=''))
-QBSnapshots1<-sqlQuery(sqlConnString, "select * from QBSnapshots1", stringsAsFactors=FALSE)
-QBSnapshots2<-sqlQuery(sqlConnString, "select * from QBSnapshots2", stringsAsFactors=FALSE)
-QBSnapshots3<-sqlQuery(sqlConnString, "select * from QBSnapshots3", stringsAsFactors=FALSE)
 
-QBSnapshotsFull<-rbind(QBSnapshots1,QBSnapshots2,QBSnapshots3)
-
-
-### Alter Position1
-QBSnapshotsFull <- QBSnapshotsFull %>%
-  mutate(Position1=ifelse(Position1=='Not Specified' & Position2=='Represented','NotSpec-Represented',Position1))
-
+sqlConnString <- odbcDriverConnect(paste("Driver=SQL Server Native Client 11.0; Server=", "172.25.16.138", ";Database=", "Ericsson_DW", ";Trusted_Connection=yes;", sep=''))
+QBSnapshotsFull<-sqlQuery(sqlConnString, "select * from QBSnapshotsMobility", stringsAsFactors=FALSE)
 
   ## set aside position mapping
 positionMapping<-QBSnapshotsFull %>%
   filter(IntervalDate==max(IntervalDate)) %>%
-  select(EmployeeID,PositionKey,Position1,Position2)
+  select(EmployeeID,AssignedPositionKey,Position2,Position3)
+
+table(QBSnapshotsFull$Position3)
 
 QBSnapshotsFull <- QBSnapshotsFull %>%
   arrange(EmployeeID,IntervalDate) %>%
-  select(EmployeeID,IntervalDate,Tenure,Age,Position1,Position2,Attrition) %>%
+  select(EmployeeID,IntervalDate,Age,Tenure,Position2,Position3,Turnover) %>%
   mutate(level=case_when(
-    Position2 %in% c('Co-Op/Intern','Non-Exempt','Represented') ~ 0,
-    Position2=='Not Specified' ~ 999,
-    TRUE ~ as.numeric(substr(Position2,7,7))
+    Position3=='E' ~ 10,
+    TRUE ~ as.numeric(substr(Position3,2,2))
   )) %>%
   group_by(EmployeeID) %>%
   mutate(lagLevel=lag(level),
-         lagPosition1=lag(Position1),
-         lagTenure=lag(Tenure),
-         lagAge=lag(Age)) %>%
-  filter(!(is.na(lagPosition1))) %>%
+         lagPosition2=lag(Position2),
+         lagTenure=lag(Tenure)) %>%
+  filter(!(is.na(lagPosition2))) %>%
   ungroup() %>%
-  mutate(promotion=ifelse(level>lagLevel & level!=999 & lagLevel!=999 & Position1==lagPosition1,1,0)) %>%
-  mutate(lateral=ifelse(lagPosition1!=Position1,1,0)) %>%
+  mutate(promotion=ifelse(level>lagLevel & level!=999 & lagLevel!=999 & Position2==lagPosition2,1,0)) %>%
+  mutate(lateral=ifelse(lagPosition2!=Position2,1,0)) %>%
   mutate(latType=ifelse(lateral==1,
-                        paste(lagPosition1,Position1,sep='_TO_'),
+                        paste(lagPosition2,Position2,sep='_TO_'),
                         'N/A'))
 
 
+### Special procedure for Ericsson, since it has missing tenure values
+lmModel <- gam(Tenure ~ s(Age), family=gaussian, data=filter(QBSnapshotsFull, !(is.na(Tenure)) & !(is.na(Age))))
+
+data.frame(Age=20:70) %>%
+  mutate(Tenure=predict(lmModel,newdata=.,type="response")) %>%
+  ggplot(aes(Age,Tenure)) + geom_line()
+
+
+QBSnapshotsFull <- QBSnapshotsFull %>%
+  mutate(Tenure = case_when(is.na(Tenure) & !(is.na(Age)) ~ predict(lmModel,newdata=.,type="response"),
+                            is.na(Tenure) & (is.na(Age)) ~ mean(QBSnapshotsFull$Tenure,na.rm=TRUE),
+                            TRUE ~ Tenure)) %>%
+  filter(!(is.na(Tenure)))
+
+
 activeHeadcount <- QBSnapshotsFull %>%
-  filter(IntervalDate==max(IntervalDate) & Attrition==0) 
+  filter(IntervalDate==max(IntervalDate) & Turnover==0) 
 
 ## Remove Outliers ----
   ### eliminate any lateral moves where >90% of the cases for that move type occur in a single month (assuming these are one-time events)
@@ -81,7 +78,7 @@ latsForElimination <- QBSnapshotsFull %>%
   summarise(freq=length(EmployeeID)) %>%
   mutate(pect=round(freq/totalFreq,2)) %>%
   arrange(-totalFreq,IntervalDate) %>%
-  filter(pect>=.90) %>%
+  filter(pect>=.20) %>%
   ungroup() %>%
   select(latType,IntervalDate) %>%
   mutate(eliminationFlag=1)
@@ -92,15 +89,28 @@ QBSnapshotsFull <- QBSnapshotsFull %>%
   mutate(lateral=ifelse(eliminationFlag==1,0,lateral)) %>%
   select(-latType)
 
-unique(QBSnapshotsFull$IntervalDate)
+### filter down to an even three years of data
+QBSnapshotsFull <- QBSnapshotsFull %>%
+  filter(IntervalDate>=max(QBSnapshotsFull$IntervalDate)-months(35))
+
 ## Set up dataset with six-month periods ----
+  ### using this alternative way to map in the monthRank column, because the dense_rank function took over two hours!
+
+monthRankMapping <- QBSnapshotsFull %>%
+  filter(IntervalDate>=max(QBSnapshotsFull$IntervalDate)-months(35)) %>%
+  select(IntervalDate) %>%
+  unique(.) %>%
+  arrange(IntervalDate) %>%
+  mutate(monthRank=row_number())
+
+
 QBSnapshots <- QBSnapshotsFull %>% 
-  mutate(monthRank = dense_rank(IntervalDate)) %>%
-  group_by(EmployeeID) %>%
-  mutate(dateRank = dense_rank(IntervalDate)) %>%
+  left_join(.,monthRankMapping,by='IntervalDate') %>%
+  #group_by(EmployeeID) %>%
+  #mutate(dateRank = dense_rank(IntervalDate)) %>%
   ungroup()
 
-# divide the full timespan into six month chunks; for production you might take a shorter span
+# take an even three years of data, then divide the full timespan into six month chunks; for production you might take a shorter span
 QBSnapshots <- QBSnapshots %>%
   mutate(period=ceiling(monthRank/6)) %>%
   group_by(period) %>%
@@ -109,20 +119,19 @@ QBSnapshots <- QBSnapshots %>%
   group_by(EmployeeID,period) %>%
   mutate(promotion=max(promotion)) %>% mutate(lateral=max(lateral)) 
 
-
 periodBegin <- QBSnapshots %>%
   group_by(EmployeeID,period) %>%
   filter(monthRank==min(monthRank)) %>%
-  select(EmployeeID,period,lagPosition1,lagLevel) %>%
-  rename('positionBegin'='lagPosition1',
+  select(EmployeeID,period,lagPosition2,lagLevel) %>%
+  rename('positionBegin'='lagPosition2',
          'levelBegin'='lagLevel') %>%
   ungroup()
 
 periodEnd <- QBSnapshots %>%
   group_by(EmployeeID,period) %>%
   filter(monthRank==max(monthRank)) %>%
-  select(EmployeeID,period,Position1,level) %>%
-  rename('positionEnd'='Position1',
+  select(EmployeeID,period,Position2,level) %>%
+  rename('positionEnd'='Position2',
          'levelEnd'='level') %>%
   ungroup()
 
@@ -133,4 +142,3 @@ QBSnapshots <- QBSnapshots %>%
   mutate(promType=ifelse(promotion==1,paste(levelBegin,levelEnd,sep='_TO_'),'N/A')) %>%
   filter(periodBegin==1) %>%
   ungroup()
-
