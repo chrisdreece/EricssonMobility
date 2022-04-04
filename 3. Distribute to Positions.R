@@ -3,72 +3,71 @@ keep(netMoves,netProms,qaTransfers,qaPromotions,lateralMovesRollup,promotionsRol
 
 ## Distribute Moves ----
   ## NOTE: this are monthly counts by Position
-pos1Mapping <- positionMapping %>%
-  group_by(Position1) %>%
-  mutate(pos1Headcount=length(EmployeeID)) %>%
+pos2Mapping <- positionMapping %>%
+  group_by(Position2) %>%
+  mutate(pos2Headcount=length(EmployeeID)) %>%
   ungroup() %>%
-  group_by(PositionKey,Position1,pos1Headcount) %>%
+  group_by(AssignedPositionKey,Position2,pos2Headcount) %>%
   summarise(headcount=length(EmployeeID)) %>%
   ungroup() %>%
-  mutate(prop=round(headcount/pos1Headcount,10)) %>%
-  arrange(Position1,-prop) %>%
-  select(Position1,PositionKey,prop)
+  mutate(prop=round(headcount/pos2Headcount,10)) %>%
+  arrange(Position2,-prop) %>%
+  select(Position2,AssignedPositionKey,prop)
 
-positionKeyMoves <- netMoves %>%
-  left_join(.,pos1Mapping,by=c('Position1')) %>%
+AssignedPositionKeyMoves <- netMoves %>%
+  left_join(.,pos2Mapping,by=c('Position2')) %>%
   mutate(LateralIn=gains*prop,
          LateralOut=losses*prop) %>%
-  select(PositionKey,LateralIn,LateralOut)
+  select(AssignedPositionKey,LateralIn,LateralOut)
 
 
 
 ## Distribute Promotions ----
 ## NOTE: this are monthly counts by Position
-pos1Pos2Mapping <- positionMapping %>%
+pos2pos3Mapping <- positionMapping %>%
   mutate(level=case_when(
-    Position2 %in% c('Co-Op/Intern','Non-Exempt','Represented') ~ 0,
-    Position2=='Not Specified' ~ 999,
-    TRUE ~ as.numeric(substr(Position2,7,7))
+    Position3=='E' ~ 10,
+    TRUE ~ as.numeric(substr(Position3,2,2))
   )) %>%
-  group_by(Position1,level) %>%
-  mutate(pos1Pos2Headcount=length(EmployeeID)) %>%
+  group_by(Position2,level) %>%
+  mutate(pos2pos3Headcount=length(EmployeeID)) %>%
   ungroup() %>%
-  group_by(PositionKey,Position1,level,pos1Pos2Headcount) %>%
+  group_by(AssignedPositionKey,Position2,level,pos2pos3Headcount) %>%
   summarise(headcount=length(EmployeeID)) %>%
   ungroup() %>%
-  mutate(prop=round(headcount/pos1Pos2Headcount,10)) %>%
-  arrange(Position1,level,-prop) %>%
-  select(Position1,level,PositionKey,prop)
+  mutate(prop=round(headcount/pos2pos3Headcount,10)) %>%
+  arrange(Position2,level,-prop) %>%
+  select(Position2,level,AssignedPositionKey,prop)
 
 
 ### remove Position/Level combos from netProms that do not appear in the PositionMapping
-  ### this occurs because the promotions model considers Position1='Electrical Engineer' and Level = 7 as eligible for promotion
+  ### this occurs because the promotions model considers Position2='Electrical Engineer' and Level = 7 as eligible for promotion
   ### to level 8 (for example), and so sends some promotional headcount to this combo, BUT it's possible there are no level 8's in the active headcount, so no position to distribute to.
   ### this should be a small number, check that here:
 
-existingCombos <- pos1Pos2Mapping %>%
-  mutate(Position1_level=paste(Position1,level,sep='-')) %>%
-  select(Position1_level) %>%
+existingCombos <- pos2pos3Mapping %>%
+  mutate(Position2_level=paste(Position2,level,sep='-')) %>%
+  select(Position2_level) %>%
   unique(.)
 
 netPromsFilteredOut<-netProms %>%
-  filter(!(paste(Position1,level,sep='-') %in% existingCombos$Position1_level))
+  filter(!(paste(Position2,level,sep='-') %in% existingCombos$Position2_level))
 
 netProms<-netProms %>%
-  filter(paste(Position1,level,sep='-') %in% existingCombos$Position1_level)
+  filter(paste(Position2,level,sep='-') %in% existingCombos$Position2_level)
 
-positionKeyProms <- netProms %>%
-  left_join(.,pos1Pos2Mapping,by=c('Position1','level')) %>%
+AssignedPositionKeyProms <- netProms %>%
+  left_join(.,pos2pos3Mapping,by=c('Position2','level')) %>%
   mutate(PromotionIn=gains*prop,
          PromotionOut=losses*prop) %>%
-  select(PositionKey,PromotionIn,PromotionOut)
+  select(AssignedPositionKey,PromotionIn,PromotionOut)
 
 
-Transfers<-bind_rows(positionKeyMoves,positionKeyProms)
+Transfers<-bind_rows(AssignedPositionKeyMoves,AssignedPositionKeyProms)
 Transfers[is.na(Transfers)] <- 0
 
 Transfers <- Transfers %>%
-  group_by(PositionKey) %>%
+  group_by(AssignedPositionKey) %>%
   summarise(LateralIn=sum(LateralIn),
             LateralOut=sum(LateralOut),
             PromotionIn=sum(PromotionIn),
